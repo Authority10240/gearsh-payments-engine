@@ -57,6 +57,32 @@ export interface PayFastAdhocPaymentInput {
 }
 
 /**
+ * Discriminated outcome of a PayFast Adhoc Payments call (PAY-005). Mirrors
+ * the refund-result discrimination from PAY-004 so the dispatcher can:
+ *   - decide whether to retry (5xx / network / timeout → retriable=true),
+ *   - persist raw_gateway_payload + failure_reason on the payout row even
+ *     when the call fails, and
+ *   - emit `escrow.payout.failed` with a clean reason rather than a generic
+ *     PAYFAST_UPSTREAM_FAILURE.
+ */
+export interface PayFastAdhocPaymentSuccess {
+  ok: true;
+  payoutId: string;
+  rawResponse: unknown;
+}
+
+export interface PayFastAdhocPaymentFailure {
+  ok: false;
+  /** True when the caller should back off + retry (5xx / network / timeout). */
+  retriable: boolean;
+  status?: number;
+  reason: string;
+  rawResponse: unknown;
+}
+
+export type PayFastAdhocPaymentResult = PayFastAdhocPaymentSuccess | PayFastAdhocPaymentFailure;
+
+/**
  * Axios-based PayFast client. Implements:
  *   - Hosted-checkout form-param generation (Process URL).
  *   - ITN signature verification.
@@ -232,17 +258,41 @@ export class PayFastClient {
     }
   }
 
-  /** POST /transactions/adhoc — artist payouts (PAY-005). */
-  async adhocPayment(input: PayFastAdhocPaymentInput): Promise<{ payoutId: string }> {
-    this.assertEnabled();
+  /**
+   * POST /transactions/adhoc — artist payouts (PAY-005). Returns a
+   * discriminated PayFastAdhocPaymentResult so the dispatcher can implement
+   * retries (5xx) vs terminal failures (4xx) without throwing — same shape
+   * as `refund()`.
+   *
+   * Body shape: PayFast Adhoc Payments expects merchant_id, version, amount
+   * (major units string), recipient bank details, a unique reference. We
+   * sign over the same params then send as application/x-www-form-urlencoded
+   * (this matches the PayFast convention for /process and /refunds; the
+   * Adhoc endpoint follows the same form-encoded contract).
+   */
+  async adhocPayment(input: PayFastAdhocPaymentInput): Promise<PayFastAdhocPaymentResult> {
+    if (!this.enabled) {
+      return {
+        ok: false,
+        retriable: false,
+        reason:
+          'PayFast credentials are not configured. Set PAYFAST_MERCHANT_ID, PAYFAST_MERCHANT_KEY, ' +
+          'PAYFAST_PASSPHRASE, PAYFAST_PROCESS_URL and PAYFAST_ADHOC_PAYMENT_URL via Secret Manager.',
+        rawResponse: null,
+      };
+    }
     const url = this.config.payfast.adhocPaymentUrl;
     if (!url) {
-      throw new AppException(ErrorCode.PAYFAST_UPSTREAM_FAILURE, {
-        detail: 'PAYFAST_ADHOC_PAYMENT_URL is not configured.',
-      });
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'PAYFAST_ADHOC_PAYMENT_URL is not configured.',
+        rawResponse: null,
+      };
     }
     const params: SignableParams = {
       merchant_id: this.config.payfast.merchantId!,
+      version: 'v1',
       amount: centsToMajorString(input.amountCents),
       reference: input.reference,
       bank_name: input.bankName,
@@ -252,19 +302,49 @@ export class PayFastClient {
       account_type: input.accountType,
       description: input.description,
     };
-    const body: SignableParams = {
-      ...params,
-      signature: signParams(params, this.config.payfast.passphrase),
-    };
+    const body = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null) continue;
+      body.append(k, String(v));
+    }
+    body.append('signature', signParams(params, this.config.payfast.passphrase));
     try {
-      const res = await this.http.post<{ payout_id?: string }>(url, body);
-      const payoutId = res.data?.payout_id ?? '';
-      return { payoutId };
-    } catch (err) {
-      this.logger.warn(`PayFast adhoc payment failed: ${(err as Error).message}`);
-      throw new AppException(ErrorCode.PAYFAST_UPSTREAM_FAILURE, {
-        detail: 'PayFast adhoc-payment endpoint failed.',
+      const res = await this.http.post<{ payout_id?: string; reference?: string }>(url, body, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       });
+      // PayFast returns `payout_id` per the Adhoc Payments contract; fall
+      // back to `reference` echo if the API ever swaps the field name.
+      const payoutId = res.data?.payout_id ?? res.data?.reference ?? '';
+      if (!payoutId) {
+        return {
+          ok: false,
+          retriable: false,
+          status: res.status,
+          reason: 'PayFast Adhoc Payments returned 200 with no payout_id.',
+          rawResponse: res.data ?? null,
+        };
+      }
+      return { ok: true, payoutId, rawResponse: res.data ?? null };
+    } catch (err) {
+      const axiosErr = err as AxiosError<unknown>;
+      const status = axiosErr.response?.status;
+      const data = axiosErr.response?.data ?? null;
+      const retriable =
+        status === undefined ||
+        status >= 500 ||
+        axiosErr.code === 'ECONNABORTED' ||
+        axiosErr.code === 'ETIMEDOUT' ||
+        axiosErr.code === 'ECONNRESET';
+      this.logger.warn(
+        `PayFast adhoc payment failed (status=${status ?? 'network'}, retriable=${retriable}): ${(err as Error).message}`,
+      );
+      return {
+        ok: false,
+        retriable,
+        status,
+        reason: extractFailureReason(data, axiosErr),
+        rawResponse: data,
+      };
     }
   }
 

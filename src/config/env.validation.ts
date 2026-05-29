@@ -68,6 +68,19 @@ export const envSchema = z
     // pgcrypto symmetric key for artist_payout_methods.account_number_encrypted.
     PAYOUT_METHOD_ENCRYPTION_KEY: z.string().min(16),
 
+    // Payout dispatcher / retry — env-gated for tests + ops (PAY-005, mirrors
+    // the FX cron pattern). Default ON so production cron is active without
+    // extra config; tests flip these to false to avoid the hourly tick
+    // racing with seed data.
+    PAYOUT_DISPATCH_ENABLED: booleanish.optional(),
+    PAYOUT_RETRY_ENABLED: booleanish.optional(),
+    // Max attempts before the retry job stops re-queueing a FAILED payout
+    // (gearsh-payments-engine.md §Jobs: "5 attempts over 24h").
+    PAYOUT_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
+    // Bounded batch — the dispatcher picks at most this many QUEUED rows per
+    // tick so a backlog can't starve other DB work.
+    PAYOUT_DISPATCH_BATCH_SIZE: z.coerce.number().int().min(1).default(50),
+
     // Reconciliation (PAY-007)
     RECONCILIATION_ALERT_THRESHOLD_CENTS: z.coerce.number().int().min(0).default(1000),
     RECONCILIATION_ALERT_EMAIL: z.string().optional(),

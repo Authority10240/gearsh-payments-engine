@@ -416,6 +416,10 @@ model Payout {
   cancelledAt         DateTime?   @map("cancelled_at") @db.Timestamptz(3)
   cancellationReason  String?     @map("cancellation_reason")
   failureReason       String?     @map("failure_reason")
+  // Retry bookkeeping (PAY-005). The retry job bumps `attempts` and gates the
+  // next eligible re-queue against `failed_at + min(24h, 2^attempts hours)`.
+  attempts            Int         @default(0)
+  failedAt            DateTime?   @map("failed_at") @db.Timestamptz(3)
   rawGatewayPayload   Json?       @map("raw_gateway_payload")
   createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt           DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -424,6 +428,7 @@ model Payout {
 
   @@index([artistId])
   @@index([state, dispatchAfter])
+  @@index([state, failedAt])
   @@map("payouts")
 }
 
