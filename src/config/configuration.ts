@@ -60,6 +60,12 @@ export interface AppConfig {
     dispatchBatchSize: number;
   };
   reconciliation: { alertThresholdCents: number; alertEmail?: string };
+  /**
+   * Subscriber-driven actor id (PAY-006). RefundsService.issueRefund requires
+   * a non-null initiatedBy uuid; subscribers pass this when they originate
+   * the refund from a bookings.cancelled / disputes.resolved event.
+   */
+  systemUserId: string;
   pubsub: {
     projectId?: string;
     publishTopics: string[];
@@ -156,6 +162,7 @@ export function buildConfig(env: Env): AppConfig {
       alertThresholdCents: env.RECONCILIATION_ALERT_THRESHOLD_CENTS,
       alertEmail: env.RECONCILIATION_ALERT_EMAIL,
     },
+    systemUserId: env.SYSTEM_USER_ID,
     pubsub: {
       projectId: env.PUBSUB_PROJECT_ID,
       publishTopics: csv(env.PUBSUB_PUBLISH_TOPICS),

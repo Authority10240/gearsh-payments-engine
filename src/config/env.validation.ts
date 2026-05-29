@@ -85,6 +85,13 @@ export const envSchema = z
     RECONCILIATION_ALERT_THRESHOLD_CENTS: z.coerce.number().int().min(0).default(1000),
     RECONCILIATION_ALERT_EMAIL: z.string().optional(),
 
+    // Subscriber-driven actor id (PAY-006). Stamped onto refunds.initiated_by
+    // when bookings.cancelled / disputes.resolved trigger a RefundsService
+    // call from a Pub/Sub message rather than an admin HTTP request. Defaults
+    // to the all-zeros UUID for dev/CI so the engine boots without extra
+    // config; production overrides via Secret Manager.
+    SYSTEM_USER_ID: z.string().uuid().default('00000000-0000-0000-0000-000000000000'),
+
     // Pub/Sub
     PUBSUB_PROJECT_ID: z.string().optional(),
     PUBSUB_PUBLISH_TOPICS: z.string().default('payment-events,escrow-events'),
