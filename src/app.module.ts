@@ -21,6 +21,7 @@ import { HealthModule } from './health/health.module';
 import { FxModule } from './modules/fx/fx.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { EscrowModule } from './modules/escrow/escrow.module';
+import { RefundsModule } from './modules/refunds/refunds.module';
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { EscrowModule } from './modules/escrow/escrow.module';
     FxModule,
     PaymentsModule,
     EscrowModule,
+    RefundsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: ProblemFilter },

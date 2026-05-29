@@ -35,6 +35,15 @@ export interface MutationContext {
 export interface RefundOptions extends MutationContext {
   faultParty: FaultParty;
   reason?: string | null;
+  /**
+   * Optional FK back to the `refunds` row that triggered this transition. PAY-
+   * 004's RefundsService passes the id of the refund row it just inserted; the
+   * EscrowService persists it onto escrow_events.refund_id inside the same DB
+   * transaction. Subscriber-driven refunds (PAY-006) that go through the
+   * RefundsService get this populated too; direct admin /escrow/holds/:id/refund
+   * calls (no PayFast round-trip) leave it NULL.
+   */
+  refundId?: string | null;
 }
 
 export interface FreezeOptions extends MutationContext {
@@ -211,6 +220,7 @@ export class EscrowService {
             amountCents: refundCents,
             actorId: opts.actorId ?? null,
             note: opts.note ?? opts.reason ?? null,
+            refundId: opts.refundId ?? null,
           },
         });
         await this.writeLedger(
@@ -285,6 +295,7 @@ export class EscrowService {
             amountCents: refundCents,
             actorId: opts.actorId ?? null,
             note: opts.note ?? opts.reason ?? null,
+            refundId: opts.refundId ?? null,
           },
         });
         // refundIsFull=false → no PLATFORM_REVENUE reversal on partials.

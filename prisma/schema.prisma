@@ -81,8 +81,15 @@ enum PayFastPaymentStatus {
   CANCELLED
 }
 
+// Refund row state machine (PAY-004). PROCESSING is the "row inserted, PayFast
+// round-trip in flight" intermediate; SUCCEEDED requires the gateway round-trip
+// AND the escrow state flip to have committed; FAILED means the gateway rejected
+// or all retries exhausted — funds stay HELD and an admin can retry.
+// PENDING is retained for back-compat with the PAY-001 init migration but no
+// new row is written in PENDING by PAY-004 — callers use PROCESSING.
 enum RefundState {
   PENDING
+  PROCESSING
   SUCCEEDED
   FAILED
 }
@@ -262,19 +269,29 @@ model Transaction {
 }
 
 model Refund {
-  id              String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  transactionId   String      @map("transaction_id") @db.Uuid
-  amountCents     BigInt      @map("amount_cents")
-  reason          String?
-  initiatedBy     String      @map("initiated_by") @db.Uuid
-  state           RefundState @default(PENDING)
-  gatewayRefundId String?     @map("gateway_refund_id")
-  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+  id                     String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  transactionId          String      @map("transaction_id") @db.Uuid
+  amountCents            BigInt      @map("amount_cents")
+  reason                 String?
+  initiatedBy            String      @map("initiated_by") @db.Uuid
+  state                  RefundState @default(PROCESSING)
+  gatewayRefundId        String?     @map("gateway_refund_id")
+  // Raw PayFast response payload (success or failure) — captured for ops/audit
+  // and the nightly reconciliation report (PAY-007). PAY-004.
+  gatewayResponsePayload Json?       @map("gateway_response_payload")
+  // Last error returned by the PayFast Refund API (or "timeout"/"5xx_exhausted"
+  // when retries are exhausted). PAY-004.
+  failureReason          String?     @map("failure_reason")
+  // Set when state moves to SUCCEEDED. NULL while PROCESSING or FAILED. PAY-004.
+  completedAt            DateTime?   @map("completed_at") @db.Timestamptz(3)
+  createdAt              DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt              DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
 
-  transaction Transaction @relation(fields: [transactionId], references: [id])
+  transaction  Transaction   @relation(fields: [transactionId], references: [id])
+  escrowEvents EscrowEvent[]
 
   @@index([transactionId])
+  @@index([state])
   @@map("refunds")
 }
 
@@ -340,15 +357,17 @@ model EscrowEvent {
   amountCents BigInt           @map("amount_cents")
   actorId     String?          @map("actor_id") @db.Uuid
   note        String?
-  // Forward-compat link to the future refunds row. PAY-003 writes NULL; PAY-004
-  // owns the Refund + PayFast Refund API call and will populate this column.
-  // No DB FK yet — `refunds` currently keys on `transactions` (gearsh-payments-
-  // engine.md §Data model). PAY-004 adds the constraint when refunds is wired
-  // directly to escrow.
+  // Link to the refund row that triggered this escrow event. NULL for non-
+  // refund events (HELD/RELEASED/FROZEN/RESOLVED_RELEASE) and for refunds
+  // initiated outside the RefundsService (legacy/PAY-003 partial refunds
+  // without a gateway round-trip). FK added in PAY-004 (ON DELETE SET NULL so
+  // an admin can prune a malformed refund row without losing the escrow audit
+  // trail).
   refundId    String?          @map("refund_id") @db.Uuid
   createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
 
   hold          EscrowHold     @relation(fields: [holdId], references: [id])
+  refund        Refund?        @relation(fields: [refundId], references: [id], onDelete: SetNull)
   ledgerEntries LedgerEntry[]
 
   @@index([holdId])
