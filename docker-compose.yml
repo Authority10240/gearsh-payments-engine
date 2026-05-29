@@ -1,0 +1,40 @@
+# Local development dependencies for gearsh-payments-engine.
+# Brings up an isolated Postgres + Redis for the money-handling database and the
+# idempotency / FX caches. PayFast + Open Exchange Rates use live credentials
+# via .env.local (engine degrades gracefully when those are absent).
+services:
+  postgres:
+    image: postgres:16
+    container_name: gearsh-payments-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gearsh_payments
+      POSTGRES_USER: gearsh
+      POSTGRES_PASSWORD: local
+    ports:
+      - '5435:5432'
+    volumes:
+      - gearsh-payments-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U gearsh -d gearsh_payments']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: gearsh-payments-redis
+    restart: unless-stopped
+    ports:
+      - '6381:6379'
+    volumes:
+      - gearsh-payments-redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gearsh-payments-pgdata:
+  gearsh-payments-redisdata:

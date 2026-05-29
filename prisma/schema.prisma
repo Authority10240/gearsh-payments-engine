@@ -1,0 +1,430 @@
+// gearsh-payments-engine database schema.
+// All money movement in one database: carts, payment intents, transactions,
+// refunds, escrow holds, ledger entries, payouts, FX rates, payout methods,
+// outbox + processed-events (gearsh-payments-engine.md §Data model + §8 add'ns).
+//
+// Conventions: wire format is camelCase; columns are snake_case via @map
+// (conventions §3). Primary keys are UUIDv7 (conventions §2) — Postgres 16 has
+// no native uuidv7(), so a uuid_generate_v7() SQL function is installed by the
+// init migration and used as the column default. Timestamps are timestamptz(3).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  // pgcrypto backs artist_payout_methods.account_number_encrypted (business
+  // rules §8.2); uuid-ossp backs uuid_generate_v7() (conventions §2).
+  extensions = [pgcrypto, uuidOssp(map: "uuid-ossp")]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums (mirror contracts/openapi/payments.yaml + business-rules §8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum Currency {
+  ZAR
+  USD
+  GBP
+  NGN
+  KES
+  GHS
+  AUD
+  CAD
+}
+
+enum CartState {
+  ACTIVE
+  CHECKED_OUT
+  ABANDONED
+}
+
+// Payment-intent state machine (gearsh-payments-engine.md + business-rules §8.6).
+// CREATED → LOCKED (after /lock) → AWAITING_PAYMENT (after PayFast redirect) →
+// SUCCEEDED | FAILED | EXPIRED | CANCELLED.
+enum IntentState {
+  CREATED
+  LOCKED
+  AWAITING_PAYMENT
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum PaymentGateway {
+  PAYFAST
+}
+
+enum TransactionType {
+  CHARGE
+  REFUND
+}
+
+enum TransactionState {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum RefundState {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+enum EscrowState {
+  HELD
+  RELEASED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  DISPUTED
+}
+
+// Escrow event types audit the state machine transitions (PAY-003).
+enum EscrowEventType {
+  HELD
+  RELEASED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  FROZEN
+  RESOLVED_RELEASE
+  RESOLVED_REFUND
+}
+
+// Payouts to artists via PayFast Adhoc Payments. CANCELLED is added in addition
+// to the spec enum so dispute-window-cancelled payouts are explicit (§8.1).
+enum PayoutState {
+  QUEUED
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+// Double-entry ledger accounts (gearsh-payments-engine.md §Escrow + ledger).
+enum LedgerAccount {
+  CLIENT_FUNDS
+  ESCROW_LIABILITY
+  PLATFORM_REVENUE
+  ARTIST_PAYABLE
+  PAYFAST_SETTLEMENT
+  REFUNDS_ISSUED
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum BankAccountType {
+  CHEQUE
+  SAVINGS
+  TRANSMISSION
+}
+
+enum ExchangeRateSource {
+  OPEN_EXCHANGE_RATES
+  STUB
+  MANUAL
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cart (schema present for future use; endpoints NOT exposed in v1, business
+// rules §8.3 — direct payment-intent flow only.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Cart {
+  id        String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  currency  Currency
+  state     CartState @default(ACTIVE)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  items CartItem[]
+
+  @@index([userId])
+  @@map("carts")
+}
+
+model CartItem {
+  id             String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  cartId         String   @map("cart_id") @db.Uuid
+  serviceId      String   @map("service_id") @db.Uuid
+  artistId       String   @map("artist_id") @db.Uuid
+  quantity       Int      @default(1)
+  unitPriceCents BigInt   @map("unit_price_cents")
+  startAt        DateTime @map("start_at") @db.Timestamptz(3)
+  endAt          DateTime @map("end_at") @db.Timestamptz(3)
+  notes          String?
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  cart Cart @relation(fields: [cartId], references: [id], onDelete: Cascade)
+
+  @@index([cartId])
+  @@map("cart_items")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payment intents
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PaymentIntent {
+  id              String         @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  bookingId       String         @unique @map("booking_id") @db.Uuid
+  userId          String         @map("user_id") @db.Uuid
+  artistId        String         @map("artist_id") @db.Uuid
+  // Amounts are stored in the client's currency.
+  subtotalCents   BigInt         @map("subtotal_cents")
+  serviceFeeCents BigInt         @map("service_fee_cents")
+  totalCents      BigInt         @map("total_cents")
+  currency        Currency
+  // The currency the client is paying in (== currency for v1 since the
+  // mobile app presents the booking in the client's preferred currency).
+  clientCurrency  Currency       @map("client_currency")
+  gateway         PaymentGateway @default(PAYFAST)
+
+  // PayFast references (set after PayFast first responds).
+  pfPaymentId     String?        @map("pf_payment_id")
+  mPaymentId      String?        @unique @map("m_payment_id")
+
+  state           IntentState    @default(CREATED)
+
+  // FX lock fields (business-rules §8.6). Quoted at intent creation, locked at
+  // /lock (when the client presses "Pay"), used by PayFast (settles in ZAR).
+  quotedZarAmountCents BigInt?   @map("quoted_zar_amount_cents")
+  zarAmountCentsLocked BigInt?   @map("zar_amount_cents_locked")
+  zarRateLocked        Decimal?  @map("zar_rate_locked") @db.Decimal(18, 8)
+  zarLockedAt          DateTime? @map("zar_locked_at") @db.Timestamptz(3)
+  lockExpiresAt        DateTime? @map("lock_expires_at") @db.Timestamptz(3)
+
+  idempotencyKey  String?        @map("idempotency_key")
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  transactions Transaction[]
+  escrowHolds  EscrowHold[]
+
+  @@unique([idempotencyKey])
+  @@index([userId])
+  @@index([artistId])
+  @@index([state])
+  @@map("payment_intents")
+}
+
+model Transaction {
+  id                String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  paymentIntentId   String           @map("payment_intent_id") @db.Uuid
+  type              TransactionType
+  amountCents       BigInt           @map("amount_cents")
+  currency          Currency
+  gatewayTxnId      String?          @map("gateway_txn_id")
+  state             TransactionState @default(PENDING)
+  rawGatewayPayload Json?            @map("raw_gateway_payload")
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  intent  PaymentIntent @relation(fields: [paymentIntentId], references: [id])
+  refunds Refund[]
+
+  @@index([paymentIntentId])
+  @@index([gatewayTxnId])
+  @@map("transactions")
+}
+
+model Refund {
+  id              String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  transactionId   String      @map("transaction_id") @db.Uuid
+  amountCents     BigInt      @map("amount_cents")
+  reason          String?
+  initiatedBy     String      @map("initiated_by") @db.Uuid
+  state           RefundState @default(PENDING)
+  gatewayRefundId String?     @map("gateway_refund_id")
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+
+  @@index([transactionId])
+  @@map("refunds")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exchange rates (daily 02:00 SAST refresh — gearsh-payments-engine.md §Jobs,
+// business-rules §8.4). The conversion helper (fx.service) reads the latest
+// row per pair for the requested asOf timestamp.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ExchangeRate {
+  fromCurrency Currency           @map("from_currency")
+  toCurrency   Currency           @map("to_currency")
+  rate         Decimal            @db.Decimal(18, 8)
+  asOf         DateTime           @map("as_of") @db.Timestamptz(3)
+  source       ExchangeRateSource @default(STUB)
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@id([fromCurrency, toCurrency, asOf])
+  @@index([fromCurrency, toCurrency, asOf(sort: Desc)])
+  @@map("exchange_rates")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Escrow (double-entry ledger)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EscrowHold {
+  id                String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  bookingId         String      @unique @map("booking_id") @db.Uuid
+  paymentIntentId   String      @map("payment_intent_id") @db.Uuid
+  clientId          String      @map("client_id") @db.Uuid
+  artistId          String      @map("artist_id") @db.Uuid
+  amountCents       BigInt      @map("amount_cents")
+  platformFeeCents  BigInt      @map("platform_fee_cents")
+  currency          Currency
+  state             EscrowState @default(HELD)
+  heldAt            DateTime    @default(now()) @map("held_at") @db.Timestamptz(3)
+  releasedAt        DateTime?   @map("released_at") @db.Timestamptz(3)
+  refundedAt        DateTime?   @map("refunded_at") @db.Timestamptz(3)
+  disputedAt        DateTime?   @map("disputed_at") @db.Timestamptz(3)
+  createdAt         DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  intent       PaymentIntent  @relation(fields: [paymentIntentId], references: [id])
+  events       EscrowEvent[]
+  ledgerEntries LedgerEntry[]
+  payouts      Payout[]
+
+  @@index([artistId])
+  @@index([state])
+  @@map("escrow_holds")
+}
+
+model EscrowEvent {
+  id          String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  holdId      String           @map("hold_id") @db.Uuid
+  type        EscrowEventType
+  amountCents BigInt           @map("amount_cents")
+  actorId     String?          @map("actor_id") @db.Uuid
+  note        String?
+  createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  hold          EscrowHold     @relation(fields: [holdId], references: [id])
+  ledgerEntries LedgerEntry[]
+
+  @@index([holdId])
+  @@map("escrow_events")
+}
+
+model LedgerEntry {
+  id          String          @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  holdId      String          @map("hold_id") @db.Uuid
+  eventId     String          @map("event_id") @db.Uuid
+  account     LedgerAccount
+  direction   LedgerDirection
+  amountCents BigInt          @map("amount_cents")
+  currency    Currency
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  hold  EscrowHold  @relation(fields: [holdId], references: [id])
+  event EscrowEvent @relation(fields: [eventId], references: [id])
+
+  @@index([holdId])
+  @@index([eventId])
+  @@index([account])
+  @@map("ledger_entries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payouts (artist) — PAY-005
+// Extends the spec enum with CANCELLED + dispatch_after fields so the dispute
+// window (business-rules §8.1) is enforced by the dispatcher cron.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Payout {
+  id                  String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  artistId            String      @map("artist_id") @db.Uuid
+  holdId              String      @map("hold_id") @db.Uuid
+  amountCents         BigInt      @map("amount_cents")
+  currency            Currency
+  state               PayoutState @default(QUEUED)
+  // Queued at escrow release; the cron only dispatches QUEUED rows with
+  // dispatch_after <= now (= released_at + DISPUTE_WINDOW_DAYS).
+  dispatchAfter       DateTime    @map("dispatch_after") @db.Timestamptz(3)
+  gatewayPayoutId     String?     @map("gateway_payout_id")
+  attemptedAt         DateTime?   @map("attempted_at") @db.Timestamptz(3)
+  completedAt         DateTime?   @map("completed_at") @db.Timestamptz(3)
+  cancelledAt         DateTime?   @map("cancelled_at") @db.Timestamptz(3)
+  cancellationReason  String?     @map("cancellation_reason")
+  failureReason       String?     @map("failure_reason")
+  rawGatewayPayload   Json?       @map("raw_gateway_payload")
+  createdAt           DateTime    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  hold EscrowHold @relation(fields: [holdId], references: [id])
+
+  @@index([artistId])
+  @@index([state, dispatchAfter])
+  @@map("payouts")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Artist payout methods — Payments owns these (business-rules §8.2).
+// account_number_encrypted is bytea encrypted via pgcrypto in service code.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ArtistPayoutMethod {
+  id                      String          @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  artistUserId            String          @unique @map("artist_user_id") @db.Uuid
+  bankName                String          @map("bank_name")
+  accountHolderName       String          @map("account_holder_name")
+  accountNumberEncrypted  Bytes           @map("account_number_encrypted")
+  branchCode              String          @map("branch_code")
+  accountType             BankAccountType @map("account_type")
+  isVerified              Boolean         @default(false) @map("is_verified")
+  verifiedAt              DateTime?       @map("verified_at") @db.Timestamptz(3)
+  verifiedBy              String?         @map("verified_by") @db.Uuid
+  lastUsedAt              DateTime?       @map("last_used_at") @db.Timestamptz(3)
+  createdAt               DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("artist_payout_methods")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Eventing infrastructure (mirrors data-engine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Transactional outbox (events/README §3). Rows are written in the same DB
+// transaction as the state change; a dispatcher publishes them to Pub/Sub.
+model OutboxEvent {
+  id            String    @id @db.Uuid // = CloudEvents envelope `id` (set by OutboxService)
+  aggregateType String    @map("aggregate_type")
+  aggregateId   String    @map("aggregate_id") @db.Uuid
+  eventType     String    @map("event_type")
+  subject       String
+  payload       Json
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  publishedAt   DateTime? @map("published_at") @db.Timestamptz(3)
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error")
+
+  @@index([publishedAt])
+  @@map("outbox_events")
+}
+
+// Consumer-side dedup (events/README §2). Unique on (event_id, consumer_name):
+// at-least-once delivery means the same envelope can arrive more than once.
+model ProcessedEvent {
+  eventId      String   @map("event_id") @db.Uuid
+  consumerName String   @map("consumer_name")
+  eventType    String   @map("event_type")
+  processedAt  DateTime @default(now()) @map("processed_at") @db.Timestamptz(3)
+
+  @@id([eventId, consumerName])
+  @@map("processed_events")
+}
