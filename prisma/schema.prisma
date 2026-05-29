@@ -150,6 +150,14 @@ enum ExchangeRateSource {
   MANUAL
 }
 
+// Nightly reconciliation run lifecycle (PAY-007). One row is INSERTed at the
+// start of the cron tick (state=RUNNING) and UPDATEd at the end.
+enum ReconciliationRunState {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cart (schema present for future use; endpoints NOT exposed in v1, business
 // rules §8.3 — direct payment-intent flow only.)
@@ -487,4 +495,57 @@ model ProcessedEvent {
 
   @@id([eventId, consumerName])
   @@map("processed_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reconciliation + admin audit (PAY-007)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One row per nightly reconciliation tick (and per admin manual trigger).
+// `findings` is a JSONB array of `{ code, severity, detail, ...context }`
+// objects (shape defined by ReconciliationService.persistFinding); the admin
+// run-detail endpoint returns the JSON verbatim. `findings_count` is
+// denormalised for cheap dashboard counts.
+model ReconciliationRun {
+  id             String                 @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  asOfDate       DateTime               @map("as_of_date") @db.Date
+  startedAt      DateTime               @default(now()) @map("started_at") @db.Timestamptz(3)
+  completedAt    DateTime?              @map("completed_at") @db.Timestamptz(3)
+  state          ReconciliationRunState @default(RUNNING)
+  findingsCount  Int                    @default(0) @map("findings_count")
+  findings       Json                   @default("[]")
+  alertSent      Boolean                @default(false) @map("alert_sent")
+  createdAt      DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([asOfDate(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@map("reconciliation_runs")
+}
+
+// Admin-action audit trail (PAY-007). Written by AdminAuditMiddleware on
+// `res.finish` via setImmediate — the audited request never waits on the row.
+// `target_id` is TEXT (not UUID) because admin routes operate on holds, payouts,
+// refunds and any future opaque id; the column stays string-typed so a future
+// new resource type doesn't require a column migration.
+//
+// `actor_id` is NULL when the audited request reached the AdminGuard but the
+// JwtAuthGuard never attached a user — in practice this never happens (the
+// middleware bails on `!req.user`), but the column is nullable to keep the
+// shape forward-compatible with un-authenticated audit paths.
+model AdminAuditLog {
+  id           String   @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  actorId      String?  @map("actor_id") @db.Uuid
+  action       String
+  path         String
+  method       String
+  targetId     String?  @map("target_id")
+  requestBody  Json?    @map("request_body")
+  responseCode Int?     @map("response_code")
+  ip           String?  @db.Inet
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([actorId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@map("admin_audit_log")
 }

@@ -81,9 +81,18 @@ export const envSchema = z
     // tick so a backlog can't starve other DB work.
     PAYOUT_DISPATCH_BATCH_SIZE: z.coerce.number().int().min(1).default(50),
 
-    // Reconciliation (PAY-007)
+    // Reconciliation (PAY-007). The cron itself is env-gated so tests can
+    // disable it cleanly (`RECONCILIATION_ENABLED=false`); the per-run alert
+    // threshold caps Σ ledger drift below which the run still passes (default
+    // R10.00 == 1000 cents per spec §Reconciliation).
+    RECONCILIATION_ENABLED: booleanish.optional(),
     RECONCILIATION_ALERT_THRESHOLD_CENTS: z.coerce.number().int().min(0).default(1000),
     RECONCILIATION_ALERT_EMAIL: z.string().optional(),
+    // Stuck-state thresholds surfaced by /v1/admin/reconciliation/stuck/* —
+    // pragmatic env knobs (PAY-006 enumerated the watch list).
+    STUCK_HOLD_HOURS: z.coerce.number().int().min(1).default(72),
+    STUCK_PAYOUT_HOURS: z.coerce.number().int().min(1).default(24),
+    STUCK_DISPUTE_DAYS: z.coerce.number().int().min(1).default(14),
 
     // Subscriber-driven actor id (PAY-006). Stamped onto refunds.initiated_by
     // when bookings.cancelled / disputes.resolved trigger a RefundsService

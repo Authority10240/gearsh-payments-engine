@@ -1,5 +1,5 @@
 import { Module, type MiddlewareConsumer, type NestModule } from '@nestjs/common';
-import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
@@ -24,6 +24,10 @@ import { PaymentsModule } from './modules/payments/payments.module';
 import { EscrowModule } from './modules/escrow/escrow.module';
 import { RefundsModule } from './modules/refunds/refunds.module';
 import { PayoutsModule } from './modules/payouts/payouts.module';
+import { ReconciliationModule } from './modules/reconciliation/reconciliation.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { AdminAuditMiddleware } from './modules/admin/audit.middleware';
+import { AuditActionInterceptor } from './modules/admin/audit-action.interceptor';
 
 @Module({
   imports: [
@@ -84,6 +88,8 @@ import { PayoutsModule } from './modules/payouts/payouts.module';
     EscrowModule,
     RefundsModule,
     PayoutsModule,
+    ReconciliationModule,
+    AdminModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: ProblemFilter },
@@ -91,10 +97,20 @@ import { PayoutsModule } from './modules/payouts/payouts.module';
     { provide: APP_GUARD, useClass: InternalServiceGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // Reads `@AuditAction(...)` metadata on the matched handler and stamps it
+    // onto `req.auditAction` for AdminAuditMiddleware to pick up on
+    // res.finish (PAY-007). No-op on routes without the decorator.
+    { provide: APP_INTERCEPTOR, useClass: AuditActionInterceptor },
   ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer): void {
     consumer.apply(RequestContextMiddleware).forRoutes('*');
+    // Audit middleware applies ONLY to the admin surface. It runs AFTER the
+    // global JwtAuthGuard so `req.user` is already attached; the middleware
+    // bails when there is no resolved subject (401 paths are not audited).
+    // PAY-007 — covers `/v1/admin/*` from EVERY module, including the
+    // already-existing AdminPayoutsController.
+    consumer.apply(AdminAuditMiddleware).forRoutes('v1/admin/*');
   }
 }

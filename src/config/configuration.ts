@@ -59,7 +59,14 @@ export interface AppConfig {
     maxAttempts: number;
     dispatchBatchSize: number;
   };
-  reconciliation: { alertThresholdCents: number; alertEmail?: string };
+  reconciliation: {
+    enabled: boolean;
+    alertThresholdCents: number;
+    alertEmail?: string;
+    stuckHoldHours: number;
+    stuckPayoutHours: number;
+    stuckDisputeDays: number;
+  };
   /**
    * Subscriber-driven actor id (PAY-006). RefundsService.issueRefund requires
    * a non-null initiatedBy uuid; subscribers pass this when they originate
@@ -159,8 +166,12 @@ export function buildConfig(env: Env): AppConfig {
       dispatchBatchSize: env.PAYOUT_DISPATCH_BATCH_SIZE,
     },
     reconciliation: {
+      enabled: env.RECONCILIATION_ENABLED ?? true,
       alertThresholdCents: env.RECONCILIATION_ALERT_THRESHOLD_CENTS,
       alertEmail: env.RECONCILIATION_ALERT_EMAIL,
+      stuckHoldHours: env.STUCK_HOLD_HOURS,
+      stuckPayoutHours: env.STUCK_PAYOUT_HOURS,
+      stuckDisputeDays: env.STUCK_DISPUTE_DAYS,
     },
     systemUserId: env.SYSTEM_USER_ID,
     pubsub: {
