@@ -311,6 +311,11 @@ model EscrowHold {
   platformFeeCents  BigInt      @map("platform_fee_cents")
   currency          Currency
   state             EscrowState @default(HELD)
+  // Running total of refunded cents while the hold is in PARTIALLY_REFUNDED.
+  // Incremented by EscrowService.partialRefund(); read by the release-remainder
+  // transition so the artist payout = amount_cents - partially_refunded_amount_cents
+  // (PAY-003, gearsh-payments-engine.md §State machine).
+  partiallyRefundedAmountCents BigInt @default(0) @map("partially_refunded_amount_cents")
   heldAt            DateTime    @default(now()) @map("held_at") @db.Timestamptz(3)
   releasedAt        DateTime?   @map("released_at") @db.Timestamptz(3)
   refundedAt        DateTime?   @map("refunded_at") @db.Timestamptz(3)
@@ -335,12 +340,19 @@ model EscrowEvent {
   amountCents BigInt           @map("amount_cents")
   actorId     String?          @map("actor_id") @db.Uuid
   note        String?
+  // Forward-compat link to the future refunds row. PAY-003 writes NULL; PAY-004
+  // owns the Refund + PayFast Refund API call and will populate this column.
+  // No DB FK yet — `refunds` currently keys on `transactions` (gearsh-payments-
+  // engine.md §Data model). PAY-004 adds the constraint when refunds is wired
+  // directly to escrow.
+  refundId    String?          @map("refund_id") @db.Uuid
   createdAt   DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
 
   hold          EscrowHold     @relation(fields: [holdId], references: [id])
   ledgerEntries LedgerEntry[]
 
   @@index([holdId])
+  @@index([refundId])
   @@map("escrow_events")
 }
 
