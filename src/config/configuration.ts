@@ -53,6 +53,12 @@ export interface AppConfig {
     liveProviderEnabled: boolean;
   };
   payoutMethodEncryptionKey: string;
+  payouts: {
+    dispatchEnabled: boolean;
+    retryEnabled: boolean;
+    maxAttempts: number;
+    dispatchBatchSize: number;
+  };
   reconciliation: { alertThresholdCents: number; alertEmail?: string };
   pubsub: {
     projectId?: string;
@@ -140,6 +146,12 @@ export function buildConfig(env: Env): AppConfig {
       liveProviderEnabled: fxLiveEnabled,
     },
     payoutMethodEncryptionKey: env.PAYOUT_METHOD_ENCRYPTION_KEY,
+    payouts: {
+      dispatchEnabled: env.PAYOUT_DISPATCH_ENABLED ?? true,
+      retryEnabled: env.PAYOUT_RETRY_ENABLED ?? true,
+      maxAttempts: env.PAYOUT_MAX_ATTEMPTS,
+      dispatchBatchSize: env.PAYOUT_DISPATCH_BATCH_SIZE,
+    },
     reconciliation: {
       alertThresholdCents: env.RECONCILIATION_ALERT_THRESHOLD_CENTS,
       alertEmail: env.RECONCILIATION_ALERT_EMAIL,

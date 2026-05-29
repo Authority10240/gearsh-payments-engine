@@ -12,6 +12,7 @@ import { PayFastModule } from './infra/payfast/payfast.module';
 import { ExchangeRatesModule } from './infra/exchange-rates/exchange-rates.module';
 import { EventsModule } from './events/events.module';
 import { SecurityModule } from './common/security.module';
+import { CryptoModule } from './common/crypto/crypto.module';
 import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
 import { ProblemFilter } from './common/problem/problem.filter';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -22,6 +23,7 @@ import { FxModule } from './modules/fx/fx.module';
 import { PaymentsModule } from './modules/payments/payments.module';
 import { EscrowModule } from './modules/escrow/escrow.module';
 import { RefundsModule } from './modules/refunds/refunds.module';
+import { PayoutsModule } from './modules/payouts/payouts.module';
 
 @Module({
   imports: [
@@ -75,11 +77,13 @@ import { RefundsModule } from './modules/refunds/refunds.module';
     ExchangeRatesModule,
     EventsModule,
     SecurityModule,
+    CryptoModule,
     HealthModule,
     FxModule,
     PaymentsModule,
     EscrowModule,
     RefundsModule,
+    PayoutsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: ProblemFilter },
