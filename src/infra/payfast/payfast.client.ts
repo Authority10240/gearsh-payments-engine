@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import axios, { type AxiosInstance } from 'axios';
+import axios, { AxiosError, type AxiosInstance } from 'axios';
 import { APP_CONFIG } from '../../config/app-config.token';
 import type { AppConfig } from '../../config/configuration';
 import { AppException } from '../../common/problem/app-exception';
@@ -17,6 +17,31 @@ export interface PayFastRefundInput {
   amountCents: bigint;
   reason?: string;
 }
+
+/**
+ * Discriminated outcome of a PayFast Refund API call (PAY-004). The
+ * RefundsService uses `retriable` to decide whether to back off + retry (5xx
+ * / timeout / network) or fail terminally (4xx / business rejection). The
+ * `rawResponse` is persisted onto refunds.gateway_response_payload regardless
+ * of outcome so the nightly reconciliation report (PAY-007) has the full
+ * gateway audit trail.
+ */
+export interface PayFastRefundSuccess {
+  ok: true;
+  refundId: string;
+  rawResponse: unknown;
+}
+
+export interface PayFastRefundFailure {
+  ok: false;
+  /** True when the caller should back off + retry (5xx / network / timeout). */
+  retriable: boolean;
+  status?: number;
+  reason: string;
+  rawResponse: unknown;
+}
+
+export type PayFastRefundResult = PayFastRefundSuccess | PayFastRefundFailure;
 
 export interface PayFastAdhocPaymentInput {
   /** Artist's verified bank-account details (decrypted in caller). */
@@ -120,18 +145,43 @@ export class PayFastClient {
     }
   }
 
-  /** POST /refunds/{pf_payment_id} — fully implemented in PAY-004. Stubbed here
-   *  so unit tests can assert the URL/params plumbing. */
-  async refund(input: PayFastRefundInput): Promise<{ refundId: string }> {
-    this.assertEnabled();
+  /**
+   * POST /refunds/{pf_payment_id} — PAY-004 wires the live round-trip. Returns
+   * a discriminated PayFastRefundResult rather than throwing so the caller
+   * (RefundsService) can:
+   *
+   *   - decide whether to retry (5xx / network / timeout → retriable=true),
+   *   - persist gateway_response_payload + failure_reason on the refund row
+   *     even when the call fails, and
+   *   - surface a clean 502 to the client only after the retry budget is
+   *     exhausted.
+   *
+   * The {pf_payment_id} placeholder in PAYFAST_REFUND_URL is replaced by the
+   * PayFast charge id (transactions.gatewayTxnId). Amounts are submitted in
+   * major units per the PayFast spec; centsToMajorString handles the format.
+   */
+  async refund(input: PayFastRefundInput): Promise<PayFastRefundResult> {
+    if (!this.enabled) {
+      return {
+        ok: false,
+        retriable: false,
+        reason:
+          'PayFast credentials are not configured. Set PAYFAST_MERCHANT_ID, PAYFAST_MERCHANT_KEY, ' +
+          'PAYFAST_PASSPHRASE and PAYFAST_PROCESS_URL via Secret Manager.',
+        rawResponse: null,
+      };
+    }
     const url = (this.config.payfast.refundUrl ?? '').replace(
       '{pf_payment_id}',
       encodeURIComponent(input.pfPaymentId),
     );
-    if (!url) {
-      throw new AppException(ErrorCode.PAYFAST_UPSTREAM_FAILURE, {
-        detail: 'PAYFAST_REFUND_URL is not configured.',
-      });
+    if (!url || !this.config.payfast.refundUrl) {
+      return {
+        ok: false,
+        retriable: false,
+        reason: 'PAYFAST_REFUND_URL is not configured.',
+        rawResponse: null,
+      };
     }
     const params: SignableParams = {
       merchant_id: this.config.payfast.merchantId!,
@@ -145,12 +195,40 @@ export class PayFastClient {
     try {
       const res = await this.http.post<{ refund_id?: string }>(url, body);
       const refundId = res.data?.refund_id ?? '';
-      return { refundId };
+      if (!refundId) {
+        // PayFast 200'd but no refund_id — surface as a terminal failure (no
+        // value in retrying a malformed 200).
+        return {
+          ok: false,
+          retriable: false,
+          status: res.status,
+          reason: 'PayFast Refund API returned 200 with no refund_id.',
+          rawResponse: res.data ?? null,
+        };
+      }
+      return { ok: true, refundId, rawResponse: res.data ?? null };
     } catch (err) {
-      this.logger.warn(`PayFast refund failed: ${(err as Error).message}`);
-      throw new AppException(ErrorCode.PAYFAST_UPSTREAM_FAILURE, {
-        detail: 'PayFast refund endpoint failed.',
-      });
+      const axiosErr = err as AxiosError<unknown>;
+      const status = axiosErr.response?.status;
+      const data = axiosErr.response?.data ?? null;
+      // Treat 5xx, timeouts, and network errors as retriable; 4xx is terminal
+      // (PayFast rejected the refund — retrying won't help).
+      const retriable =
+        status === undefined ||
+        status >= 500 ||
+        axiosErr.code === 'ECONNABORTED' ||
+        axiosErr.code === 'ETIMEDOUT' ||
+        axiosErr.code === 'ECONNRESET';
+      this.logger.warn(
+        `PayFast refund failed (status=${status ?? 'network'}, retriable=${retriable}): ${(err as Error).message}`,
+      );
+      return {
+        ok: false,
+        retriable,
+        status,
+        reason: extractFailureReason(data, axiosErr),
+        rawResponse: data,
+      };
     }
   }
 
@@ -199,4 +277,17 @@ export class PayFastClient {
       });
     }
   }
+}
+
+/** Best-effort extraction of a human-readable failure reason from a PayFast
+ *  error response. PayFast returns either JSON `{ message: ... }` or HTML
+ *  depending on the gateway path; we fall back to the axios error message. */
+function extractFailureReason(data: unknown, err: AxiosError): string {
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+    if (typeof obj.message === 'string' && obj.message.length > 0) return obj.message;
+    if (typeof obj.error === 'string' && obj.error.length > 0) return obj.error;
+  }
+  if (typeof data === 'string' && data.length > 0 && data.length < 500) return data;
+  return err.message || 'PayFast refund endpoint failed.';
 }
