@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
@@ -11,12 +12,17 @@ import type { AppConfig } from './config/configuration';
 import { validationExceptionFactory } from './common/problem/validation';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
   app.useLogger(app.get(Logger));
   app.flushLogs();
 
   const config = app.get<AppConfig>(APP_CONFIG);
   const log = app.get(Logger);
+
+  // Cloud Run / Cloud Armor terminates TLS upstream; trust the first proxy hop
+  // so `req.ip` returns the original client IP (PayFast → /v1/webhooks/payfast
+  // IP whitelist check, PAY-002 step 1). See Express "trust proxy" docs.
+  app.set('trust proxy', 1);
 
   // Security headers. CSP disabled so the self-hosted Swagger UI loads; the
   // edge (Cloud Armor) enforces the production CSP.

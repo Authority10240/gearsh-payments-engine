@@ -70,6 +70,17 @@ enum TransactionState {
   FAILED
 }
 
+// PayFast ITN payment_status values relevant for the webhook handler. ITN can
+// arrive with COMPLETE / FAILED / PENDING — the webhook persists a transaction
+// for each (intent, pfPaymentId, status) tuple so retries are idempotent and
+// distinct statuses are recorded (PAY-002).
+enum PayFastPaymentStatus {
+  COMPLETE
+  FAILED
+  PENDING
+  CANCELLED
+}
+
 enum RefundState {
   PENDING
   SUCCEEDED
@@ -197,11 +208,15 @@ model PaymentIntent {
 
   // FX lock fields (business-rules §8.6). Quoted at intent creation, locked at
   // /lock (when the client presses "Pay"), used by PayFast (settles in ZAR).
-  quotedZarAmountCents BigInt?   @map("quoted_zar_amount_cents")
-  zarAmountCentsLocked BigInt?   @map("zar_amount_cents_locked")
-  zarRateLocked        Decimal?  @map("zar_rate_locked") @db.Decimal(18, 8)
-  zarLockedAt          DateTime? @map("zar_locked_at") @db.Timestamptz(3)
-  lockExpiresAt        DateTime? @map("lock_expires_at") @db.Timestamptz(3)
+  quotedZarAmountCents     BigInt?   @map("quoted_zar_amount_cents")
+  zarAmountCentsLocked     BigInt?   @map("zar_amount_cents_locked")
+  // ZAR-denominated platform fee at the locked rate (PAY-002 §8.5). The escrow
+  // hold is amount_cents = zar_amount_cents_locked - zar_service_fee_cents_locked
+  // and PLATFORM_REVENUE is credited this amount.
+  zarServiceFeeCentsLocked BigInt?   @map("zar_service_fee_cents_locked")
+  zarRateLocked            Decimal?  @map("zar_rate_locked") @db.Decimal(18, 8)
+  zarLockedAt              DateTime? @map("zar_locked_at") @db.Timestamptz(3)
+  lockExpiresAt            DateTime? @map("lock_expires_at") @db.Timestamptz(3)
 
   idempotencyKey  String?        @map("idempotency_key")
   createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -218,20 +233,29 @@ model PaymentIntent {
 }
 
 model Transaction {
-  id                String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
-  paymentIntentId   String           @map("payment_intent_id") @db.Uuid
+  id                String                @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  paymentIntentId   String                @map("payment_intent_id") @db.Uuid
   type              TransactionType
-  amountCents       BigInt           @map("amount_cents")
+  amountCents       BigInt                @map("amount_cents")
   currency          Currency
-  gatewayTxnId      String?          @map("gateway_txn_id")
-  state             TransactionState @default(PENDING)
-  rawGatewayPayload Json?            @map("raw_gateway_payload")
-  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt         DateTime         @updatedAt @map("updated_at") @db.Timestamptz(3)
+  gatewayTxnId      String?               @map("gateway_txn_id")
+  // PayFast ITN payment_status — the dedup key includes this so retries of a
+  // distinct status (rare but defensive) are persisted as separate rows
+  // (PAY-002).
+  pfPaymentStatus   PayFastPaymentStatus? @map("pf_payment_status")
+  state             TransactionState      @default(PENDING)
+  rawGatewayPayload Json?                 @map("raw_gateway_payload")
+  createdAt         DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   intent  PaymentIntent @relation(fields: [paymentIntentId], references: [id])
   refunds Refund[]
 
+  // ITN dedup key (PAY-002). PayFast retries the same ITN until acknowledged
+  // with a 200; the webhook treats a (intent, pfPaymentId, status) tuple as
+  // already-processed when this row exists. NULLs (non-PayFast or pre-ITN
+  // PENDING rows) are excluded from uniqueness by the DB.
+  @@unique([paymentIntentId, gatewayTxnId, pfPaymentStatus])
   @@index([paymentIntentId])
   @@index([gatewayTxnId])
   @@map("transactions")
