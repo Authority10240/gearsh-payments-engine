@@ -117,6 +117,11 @@ export class PaymentIntentsService {
 
     // Re-read the latest FX rate at /lock click (business-rules §8.6 step 2).
     const locked = await this.fx.convertCurrency(intent.totalCents, intent.currency, 'ZAR');
+    // Convert the platform fee separately so the ZAR-locked fee is consistent
+    // with the rate used for the total (business-rules §8.5 / §8.7). PAY-002
+    // reads zarServiceFeeCentsLocked from the intent when computing the escrow
+    // hold + the PLATFORM_REVENUE ledger entry.
+    const lockedFee = await this.fx.convertCurrency(intent.serviceFeeCents, intent.currency, 'ZAR');
 
     const lockExpiresAt = new Date(
       Date.now() + this.config.business.fxIntentLockTtlMinutes * 60_000,
@@ -128,6 +133,7 @@ export class PaymentIntentsService {
       data: {
         state: IntentState.LOCKED,
         zarAmountCentsLocked: locked.amountCents,
+        zarServiceFeeCentsLocked: lockedFee.amountCents,
         zarRateLocked: new Prisma.Decimal(locked.rate),
         zarLockedAt: new Date(),
         lockExpiresAt,
@@ -197,6 +203,8 @@ export class PaymentIntentsService {
         intent.quotedZarAmountCents !== null ? Number(intent.quotedZarAmountCents) : null,
       zarAmountCentsLocked:
         intent.zarAmountCentsLocked !== null ? Number(intent.zarAmountCentsLocked) : null,
+      zarServiceFeeCentsLocked:
+        intent.zarServiceFeeCentsLocked !== null ? Number(intent.zarServiceFeeCentsLocked) : null,
       zarRateLocked: intent.zarRateLocked ? intent.zarRateLocked.toString() : null,
       zarLockedAt: intent.zarLockedAt ? intent.zarLockedAt.toISOString() : null,
       lockExpiresAt: intent.lockExpiresAt ? intent.lockExpiresAt.toISOString() : null,

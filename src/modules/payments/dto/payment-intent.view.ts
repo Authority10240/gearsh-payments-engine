@@ -32,6 +32,12 @@ export class PaymentIntentView {
   @ApiPropertyOptional({ minimum: 0, description: 'Locked ZAR amount (set on POST /lock).' })
   zarAmountCentsLocked!: number | null;
 
+  @ApiPropertyOptional({
+    minimum: 0,
+    description: 'Locked ZAR-denominated platform fee (set on POST /lock).',
+  })
+  zarServiceFeeCentsLocked!: number | null;
+
   @ApiPropertyOptional({ description: 'Locked rate as a decimal string.' })
   zarRateLocked!: string | null;
 

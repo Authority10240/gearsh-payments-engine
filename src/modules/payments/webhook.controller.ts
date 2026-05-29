@@ -1,37 +1,49 @@
-import { Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
-import { AppException } from '../../common/problem/app-exception';
-import { ErrorCode } from '../../common/problem/error-codes';
+import { PayFastWebhookService } from './payfast-webhook.service';
 
 /**
- * PayFast ITN (Instant Transaction Notification) webhook.
+ * PayFast ITN (Instant Transaction Notification) webhook (PAY-002).
  *
- * PAY-002: real implementation will (per gearsh-payments-engine.md §PayFast
- * integration "ITN flow"):
- *   1. Verify source IP against PAYFAST_IP_WHITELIST.
- *   2. Re-compute signature over received params via PayFastClient.
- *   3. Server-to-server validate call to PayFast.
- *   4. Verify amount + merchant_id match the intent.
- *   5. On success: update transaction, atomically create escrow hold in the
- *      same DB tx, enqueue payments.succeeded + escrow.held in the outbox.
+ * The pipeline is encapsulated in PayFastWebhookService — see that class for
+ * the documented step ordering. This controller is intentionally thin: pull
+ * the form-encoded body + the source IP, hand off, return 200. PayFast cares
+ * only about the 200 (any other status triggers an ITN retry, which is fine —
+ * dedup is by (paymentIntentId, pfPaymentId, payment_status)).
  *
- * Stubbed here so the route exists in Swagger and so the wiring (Public guard
- * skip; raw-form body parsing in main.ts) lands with the rest of the engine.
+ * @Public() so the global JwtAuthGuard skips this route. The webhook is
+ * authenticated by IP whitelist + signature + s2s validate — there is no
+ * platform JWT on PayFast's side.
  */
 @ApiTags('webhooks')
 @Controller('v1/webhooks/payfast')
 export class PayFastWebhookController {
+  constructor(private readonly handler: PayFastWebhookService) {}
+
   @Public()
   @Post()
-  @HttpCode(HttpStatus.NOT_IMPLEMENTED)
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({
     operationId: 'payfastItn',
-    summary: 'PayFast ITN — STUB (PAY-002 implements signature + validate + escrow hold).',
+    summary:
+      'PayFast ITN — IP-whitelisted, signature-verified, s2s-validated; atomically captures the transaction and creates the escrow hold.',
   })
-  notImplemented(): never {
-    throw new AppException(ErrorCode.SERVICE_UNAVAILABLE, {
-      detail: 'PayFast ITN handler is not implemented yet (see PAY-002).',
+  async receive(
+    @Req() req: Request,
+    @Body() body: Record<string, string>,
+  ): Promise<{ status: 'ok' }> {
+    // Express resolves `req.ip` from the first trusted proxy hop (main.ts sets
+    // `trust proxy = 1`), falling back to the socket peer in dev. PayFast
+    // posts as application/x-www-form-urlencoded — the global urlencoded()
+    // parser in main.ts populates `body`.
+    const sourceIp = req.ip ?? req.socket.remoteAddress ?? '';
+
+    return this.handler.handle({
+      params: body ?? {},
+      sourceIp,
+      traceparent: req.traceparent,
     });
   }
 }
