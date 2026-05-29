@@ -1,4 +1,6 @@
 import { Global, Module } from '@nestjs/common';
+import { EscrowModule } from '../modules/escrow/escrow.module';
+import { RefundsModule } from '../modules/refunds/refunds.module';
 import { OutboxDispatcher } from './outbox.dispatcher';
 import { OutboxService } from './outbox.service';
 import { PubSubPublisher } from './pubsub.publisher';
@@ -14,11 +16,16 @@ import { DisputeEventsHandler } from './subscribers/handlers/dispute-events.hand
  * payment-events + escrow-events and subscribes to booking-events +
  * dispute-events (contracts/events/topics.md).
  *
- * Handlers are STUBS in PAY-001 (real impl is PAY-006); the wiring exists so
- * the engine boots end-to-end with the bus enabled.
+ * PAY-006: handlers are now concrete and call EscrowService + RefundsService.
+ * Those services live in EscrowModule + RefundsModule respectively and are
+ * imported here so the handlers can resolve them via constructor DI. Both
+ * service modules consume OutboxService from this (@Global) EventsModule,
+ * which Nest resolves at instantiation time without needing forwardRef
+ * because the static import graph is one-directional (this module → them).
  */
 @Global()
 @Module({
+  imports: [EscrowModule, RefundsModule],
   providers: [
     // publish
     OutboxService,
