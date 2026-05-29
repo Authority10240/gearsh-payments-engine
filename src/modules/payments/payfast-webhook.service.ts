@@ -21,6 +21,10 @@ import { PrismaService } from '../../infra/prisma/prisma.service';
 import { OutboxService } from '../../events/outbox.service';
 import { PaymentsEventType } from '../../events/event-types';
 import { roundHalfToEven } from '../fx/fx.service';
+import {
+  assertBalanced as sharedAssertBalanced,
+  type LedgerEntryInput as SharedLedgerEntryInput,
+} from '../escrow/ledger.service';
 
 /**
  * PayFast posts ITN form params as application/x-www-form-urlencoded. Express
@@ -47,11 +51,9 @@ interface NormalisedItn {
   merchantId: string;
 }
 
-interface LedgerEntryInput {
-  account: LedgerAccount;
-  direction: LedgerDirection;
-  amountCents: bigint;
-}
+// Local alias kept so the file's signatures don't churn; the canonical type
+// lives in modules/escrow/ledger.service.ts (PAY-003 extraction).
+type LedgerEntryInput = SharedLedgerEntryInput;
 
 /**
  * PayFast ITN handler — gearsh-payments-engine.md §PayFast integration "ITN
@@ -238,7 +240,7 @@ export class PayFastWebhookService {
         amountCents: args.zarFee,
       },
     ];
-    assertBalanced(entries);
+    sharedAssertBalanced(entries);
 
     await this.prisma.$transaction(async (tx) => {
       // Dedup: PayFast retries the ITN until acknowledged. Same (intent,
@@ -521,24 +523,8 @@ function isKnownStatus(s: string): s is PayFastPaymentStatus {
 }
 
 /**
- * Σ DEBITS = Σ CREDITS per event (gearsh-payments-engine.md §Ledger
- * invariants). Exported for unit tests.
+ * Re-export the shared assertBalanced so the existing PAY-002 unit spec import
+ * path (`./payfast-webhook.service`) keeps compiling. The canonical
+ * implementation moved to `../escrow/ledger.service.ts` in PAY-003.
  */
-export function assertBalanced(entries: LedgerEntryInput[]): void {
-  let debits = 0n;
-  let credits = 0n;
-  for (const e of entries) {
-    if (e.amountCents < 0n) {
-      throw new AppException(ErrorCode.LEDGER_IMBALANCE, {
-        detail: 'Ledger entries must have non-negative amountCents.',
-      });
-    }
-    if (e.direction === LedgerDirection.DEBIT) debits += e.amountCents;
-    else credits += e.amountCents;
-  }
-  if (debits !== credits) {
-    throw new AppException(ErrorCode.LEDGER_IMBALANCE, {
-      detail: `Σ DEBITS (${debits}) != Σ CREDITS (${credits}).`,
-    });
-  }
-}
+export { assertBalanced } from '../escrow/ledger.service';

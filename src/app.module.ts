@@ -20,6 +20,7 @@ import { InternalServiceGuard } from './common/guards/internal-service.guard';
 import { HealthModule } from './health/health.module';
 import { FxModule } from './modules/fx/fx.module';
 import { PaymentsModule } from './modules/payments/payments.module';
+import { EscrowModule } from './modules/escrow/escrow.module';
 
 @Module({
   imports: [
@@ -76,6 +77,7 @@ import { PaymentsModule } from './modules/payments/payments.module';
     HealthModule,
     FxModule,
     PaymentsModule,
+    EscrowModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: ProblemFilter },
