@@ -17,6 +17,8 @@ export interface AppConfig {
     issuer: string;
     audience: string;
     internalAudience: string;
+    /** TTL for the local sid denylist (PAY-REPAIR-001). */
+    accessTtlSeconds: number;
   };
   services: {
     authUrl?: string;
@@ -126,6 +128,7 @@ export function buildConfig(env: Env): AppConfig {
       issuer: env.JWT_ISSUER,
       audience: env.JWT_AUDIENCE,
       internalAudience: env.INTERNAL_JWT_AUDIENCE,
+      accessTtlSeconds: env.JWT_ACCESS_TTL_SECONDS,
     },
     services: {
       authUrl: env.AUTH_SERVICE_URL,

@@ -29,6 +29,11 @@ export const envSchema = z
     JWT_PUBLIC_KEY_FILE: z.string().optional(),
     JWT_ISSUER: z.string().default('gearsh-auth'),
     JWT_AUDIENCE: z.string().default('gearsh-platform'),
+    // Mirror of the Auth Engine's JWT_ACCESS_TTL_SECONDS (default 900). Used
+    // by the auth.session.revoked subscriber (PAY-REPAIR-001) as the TTL
+    // on the local sid denylist when the event payload doesn't carry a
+    // remaining-lifetime hint.
+    JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
 
     // Internal service-to-service calls (Data → Payments on booking create).
     AUTH_SERVICE_URL: z.string().url().optional(),
@@ -106,7 +111,7 @@ export const envSchema = z
     PUBSUB_PUBLISH_TOPICS: z.string().default('payment-events,escrow-events'),
     PUBSUB_SUBSCRIPTIONS: z
       .string()
-      .default('payments-sub-booking-events,payments-sub-dispute-events'),
+      .default('payments-sub-booking-events,payments-sub-dispute-events,payments-sub-auth-events'),
     PUBSUB_EMULATOR_HOST: z.string().optional(),
     PUBSUB_ENABLED: booleanish.optional(),
 
