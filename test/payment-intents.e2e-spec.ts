@@ -139,6 +139,29 @@ describe('Payment intents (e2e)', () => {
     expect(create.body.quotedZarAmountCents).toBe(225200);
     const intentId = create.body.id;
 
+    // PAY-REPAIR-003: payments.intent.created should now be enqueued in the
+    // same transaction as the intent row. Shape matches contracts/events/
+    // schemas/payments.intent.created.json (additionalProperties:false).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const prisma = app.get<any>(
+      (await import('../src/infra/prisma/prisma.service')).PrismaService,
+    );
+    const created = await prisma.outboxEvent.findMany({
+      where: { aggregateId: intentId, eventType: 'payments.intent.created' },
+    });
+    expect(created).toHaveLength(1);
+    const createdData = created[0].payload.data;
+    expect(createdData).toMatchObject({
+      paymentIntentId: intentId,
+      bookingId,
+      clientId,
+      artistId,
+      totalCents: 225200,
+      serviceFeeCents: 25200,
+      currency: 'ZAR',
+    });
+    expect(typeof createdData.createdAt).toBe('string');
+
     const lock = await http
       .post(`/v1/payment-intents/${intentId}/lock`)
       .set('Authorization', `Bearer ${clientToken}`)

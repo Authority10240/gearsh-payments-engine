@@ -673,6 +673,10 @@ export class EscrowService {
   /**
    * Queue an artist payout row (business-rules §8.1). PAY-005's dispatcher
    * cron only picks up QUEUED rows where dispatch_after <= now.
+   *
+   * PAY-REPAIR-003: emits escrow.payout.queued in the SAME transaction. Schema
+   * is contracts/events/schemas/escrow.payout.queued.json — additionalProperties
+   * is false, so payload keys are restricted to the declared list.
    */
   private async queuePayout(
     tx: Prisma.TransactionClient,
@@ -684,7 +688,7 @@ export class EscrowService {
     const dispatchAfter = new Date(
       releasedAt.getTime() + this.config.business.disputeWindowDays * 24 * 60 * 60 * 1000,
     );
-    await tx.payout.create({
+    const payout = await tx.payout.create({
       data: {
         artistId: hold.artistId,
         holdId: hold.id,
@@ -692,6 +696,21 @@ export class EscrowService {
         currency: hold.currency,
         state: PayoutState.QUEUED,
         dispatchAfter,
+      },
+    });
+    await this.outbox.enqueue(tx, {
+      aggregateType: 'Payout',
+      aggregateId: payout.id,
+      type: PaymentsEventType.ESCROW_PAYOUT_QUEUED,
+      subject: `payouts/${payout.id}`,
+      data: {
+        payoutId: payout.id,
+        holdId: hold.id,
+        artistUserId: hold.artistId,
+        amountCents: Number(amountCents),
+        currency: hold.currency,
+        dispatchAfter: dispatchAfter.toISOString(),
+        queuedAt: payout.createdAt.toISOString(),
       },
     });
   }
