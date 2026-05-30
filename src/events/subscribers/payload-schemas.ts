@@ -74,6 +74,11 @@ const REQUIRED: Record<string, string[]> = {
     'resolvedBy',
     'resolvedAt',
   ],
+  // auth.session.revoked — PAY-REPAIR-001. Consumed by the
+  // AuthSessionRevokedHandler which SET-s the local sid denylist. The
+  // single-scope event carries `sid`; the all-scope event has only
+  // `userId` + `scope` and the handler skips it.
+  'auth.session.revoked': ['userId'],
 };
 
 export class EventPayloadValidationError extends Error {}

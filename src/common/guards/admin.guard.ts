@@ -4,11 +4,12 @@ import { RedisService } from '../../infra/redis/redis.service';
 import { AppException } from '../problem/app-exception';
 import { ErrorCode } from '../problem/error-codes';
 
-/** Redis set key holding revoked sessionIds. Populated by an auth-events
- *  subscriber if/when `auth.session.revoked` is published — same shape as
- *  the data engine's denylist (see gearsh-data-engine/src/common/guards/
- *  admin.guard.ts for the cross-engine reasoning). */
-const SESSION_DENYLIST_PREFIX = 'admin:sid:denylist:';
+/** Redis key prefix holding revoked sessionIds. Populated by the
+ *  `auth.session.revoked` subscriber (PAY-REPAIR-001 — see
+ *  events/subscribers/handlers/auth-session-revoked.handler.ts). Each
+ *  engine owns its own namespace in shared Redis (Data uses `data:`,
+ *  Media uses `media:`). */
+const SESSION_DENYLIST_PREFIX = 'payments:sid:denylist:';
 
 /**
  * Gate for `/v1/admin/*` routes (conventions §10). Requires the ADMIN role on

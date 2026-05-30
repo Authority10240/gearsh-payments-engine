@@ -7,6 +7,7 @@ import { PubSubPublisher } from './pubsub.publisher';
 import { EVENT_HANDLERS, type EventHandler } from './subscribers/event-handler';
 import { ProcessedEventsService } from './subscribers/processed-events.service';
 import { PubSubSubscriber } from './subscribers/pubsub.subscriber';
+import { AuthSessionRevokedHandler } from './subscribers/handlers/auth-session-revoked.handler';
 import { BookingEventsHandler } from './subscribers/handlers/booking-events.handler';
 import { DisputeEventsHandler } from './subscribers/handlers/dispute-events.handler';
 
@@ -34,15 +35,17 @@ import { DisputeEventsHandler } from './subscribers/handlers/dispute-events.hand
     // subscribe
     ProcessedEventsService,
     PubSubSubscriber,
+    AuthSessionRevokedHandler,
     BookingEventsHandler,
     DisputeEventsHandler,
     {
       provide: EVENT_HANDLERS,
       useFactory: (
+        authSessionRevoked: AuthSessionRevokedHandler,
         booking: BookingEventsHandler,
         dispute: DisputeEventsHandler,
-      ): EventHandler[] => [booking, dispute],
-      inject: [BookingEventsHandler, DisputeEventsHandler],
+      ): EventHandler[] => [authSessionRevoked, booking, dispute],
+      inject: [AuthSessionRevokedHandler, BookingEventsHandler, DisputeEventsHandler],
     },
   ],
   exports: [OutboxService],
