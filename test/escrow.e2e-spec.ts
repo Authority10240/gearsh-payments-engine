@@ -245,6 +245,23 @@ describe('Escrow state machine + ledger (e2e)', () => {
       where: { aggregateId: holdId, eventType: 'escrow.released' },
     });
     expect(outbox).toHaveLength(1);
+
+    // PAY-REPAIR-003: queuePayout also emits escrow.payout.queued for the new
+    // payouts row, with payload conforming to contracts/events/schemas/
+    // escrow.payout.queued.json (camelCase keys; integer cents; ISO datetimes).
+    const payout = await prisma.payout.findFirst({ where: { holdId } });
+    expect(payout).toBeTruthy();
+    const queued = await prisma.outboxEvent.findMany({
+      where: { aggregateId: payout.id, eventType: 'escrow.payout.queued' },
+    });
+    expect(queued).toHaveLength(1);
+    expect(queued[0].payload.data).toMatchObject({
+      payoutId: payout.id,
+      holdId,
+      currency: 'ZAR',
+    });
+    expect(typeof queued[0].payload.data.dispatchAfter).toBe('string');
+    expect(typeof queued[0].payload.data.queuedAt).toBe('string');
   });
 
   it('refund (artist-fault): HELD → REFUNDED, fee reversed, escrow.refunded outbox', async () => {

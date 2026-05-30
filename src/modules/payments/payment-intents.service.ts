@@ -4,6 +4,8 @@ import { APP_CONFIG } from '../../config/app-config.token';
 import type { AppConfig } from '../../config/configuration';
 import { AppException } from '../../common/problem/app-exception';
 import { ErrorCode } from '../../common/problem/error-codes';
+import { OutboxService } from '../../events/outbox.service';
+import { PaymentsEventType } from '../../events/event-types';
 import { centsToMajorString } from '../../infra/payfast/forms';
 import { PayFastClient } from '../../infra/payfast/payfast.client';
 import { PrismaService } from '../../infra/prisma/prisma.service';
@@ -32,6 +34,7 @@ export class PaymentIntentsService {
     private readonly prisma: PrismaService,
     private readonly fx: FxService,
     private readonly payfast: PayFastClient,
+    private readonly outbox: OutboxService,
   ) {}
 
   /** Internal-service call (Data → Payments on booking create). */
@@ -66,20 +69,43 @@ export class PaymentIntentsService {
     const quoted = await this.fx.convertCurrency(total, input.currency, 'ZAR');
 
     try {
-      const created = await this.prisma.paymentIntent.create({
-        data: {
-          bookingId: input.bookingId,
-          userId: input.clientId,
-          artistId: input.artistId,
-          subtotalCents: subtotal,
-          serviceFeeCents: fee,
-          totalCents: total,
-          currency: input.currency,
-          clientCurrency,
-          quotedZarAmountCents: quoted.amountCents,
-          idempotencyKey: input.idempotencyKey,
-          state: IntentState.CREATED,
-        },
+      // PAY-REPAIR-003: enqueue payments.intent.created in the SAME transaction
+      // as the intent row. Matches contracts/events/schemas/payments.intent.
+      // created.json (additionalProperties:false — only the listed keys).
+      const created = await this.prisma.$transaction(async (tx) => {
+        const row = await tx.paymentIntent.create({
+          data: {
+            bookingId: input.bookingId,
+            userId: input.clientId,
+            artistId: input.artistId,
+            subtotalCents: subtotal,
+            serviceFeeCents: fee,
+            totalCents: total,
+            currency: input.currency,
+            clientCurrency,
+            quotedZarAmountCents: quoted.amountCents,
+            idempotencyKey: input.idempotencyKey,
+            state: IntentState.CREATED,
+          },
+        });
+        await this.outbox.enqueue(tx, {
+          aggregateType: 'PaymentIntent',
+          aggregateId: row.id,
+          type: PaymentsEventType.PAYMENTS_INTENT_CREATED,
+          subject: `payment-intents/${row.id}`,
+          data: {
+            paymentIntentId: row.id,
+            bookingId: row.bookingId,
+            clientId: row.userId,
+            artistId: row.artistId,
+            totalCents: Number(row.totalCents),
+            serviceFeeCents: Number(row.serviceFeeCents),
+            currency: row.currency,
+            ...(row.mPaymentId ? { mPaymentId: row.mPaymentId } : {}),
+            createdAt: row.createdAt.toISOString(),
+          },
+        });
+        return row;
       });
       return this.toView(created);
     } catch (err) {
