@@ -12,7 +12,7 @@ services:
       POSTGRES_USER: gearsh
       POSTGRES_PASSWORD: local
     ports:
-      - '5435:5432'
+      - '5437:5432'
     volumes:
       - gearsh-payments-pgdata:/var/lib/postgresql/data
     healthcheck:
