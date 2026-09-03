@@ -112,11 +112,20 @@ export class FxService {
     }
 
     const at = asOf ?? new Date();
-    const row = await this.prisma.exchangeRate.findFirst({
-      where: { fromCurrency, toCurrency, asOf: { lte: at } },
-      orderBy: { asOf: 'desc' },
+
+    // PAY-008: an admin-pinned override beats any provider/seed row for the
+    // pair until it is deleted (§9.12 FX overrides).
+    const override = await this.prisma.fxRateOverride.findUnique({
+      where: { fromCurrency_toCurrency: { fromCurrency, toCurrency } },
     });
-    if (!row) {
+
+    const effective = override
+      ? { rate: override.rate, asOf: override.updatedAt }
+      : await this.prisma.exchangeRate.findFirst({
+          where: { fromCurrency, toCurrency, asOf: { lte: at } },
+          orderBy: { asOf: 'desc' },
+        });
+    if (!effective) {
       throw new AppException(ErrorCode.FX_RATE_UNAVAILABLE, {
         detail: `No cached rate for ${fromCurrency} → ${toCurrency} at or before ${at.toISOString()}.`,
       });
@@ -124,16 +133,66 @@ export class FxService {
 
     // Decimal math via Prisma.Decimal for the multiplication; bankers' rounding
     // is then applied to the resulting minor units.
-    const product = new Prisma.Decimal(amt.toString()).mul(row.rate);
+    const product = new Prisma.Decimal(amt.toString()).mul(effective.rate);
     const converted = roundHalfToEven(product);
 
     return {
       amountCents: converted,
       fromCurrency,
       toCurrency,
-      rate: row.rate.toString(),
-      rateAsOf: row.asOf,
+      rate: effective.rate.toString(),
+      rateAsOf: effective.asOf,
     };
+  }
+
+  // ── PAY-008: admin FX overrides ──────────────────────────────────────
+
+  async listOverrides() {
+    const rows = await this.prisma.fxRateOverride.findMany({
+      orderBy: [{ fromCurrency: 'asc' }, { toCurrency: 'asc' }],
+    });
+    return rows.map((r) => ({
+      fromCurrency: r.fromCurrency,
+      toCurrency: r.toCurrency,
+      rate: r.rate.toString(),
+      updatedAt: r.updatedAt,
+    }));
+  }
+
+  async putOverride(
+    fromCurrency: Currency,
+    toCurrency: Currency,
+    rate: string,
+    updatedBy?: string,
+  ) {
+    this.assertSupported(fromCurrency);
+    this.assertSupported(toCurrency);
+    if (fromCurrency === toCurrency) {
+      throw new AppException(ErrorCode.VALIDATION_FAILED, {
+        detail: 'Cannot override a currency against itself.',
+      });
+    }
+    const dec = new Prisma.Decimal(rate);
+    if (dec.lte(0)) {
+      throw new AppException(ErrorCode.VALIDATION_FAILED, {
+        detail: 'Rate must be positive.',
+      });
+    }
+    const row = await this.prisma.fxRateOverride.upsert({
+      where: { fromCurrency_toCurrency: { fromCurrency, toCurrency } },
+      update: { rate: dec, updatedBy },
+      create: { fromCurrency, toCurrency, rate: dec, updatedBy },
+    });
+    return {
+      fromCurrency: row.fromCurrency,
+      toCurrency: row.toCurrency,
+      rate: row.rate.toString(),
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  async deleteOverride(fromCurrency: Currency, toCurrency: Currency): Promise<void> {
+    await this.prisma.fxRateOverride.deleteMany({ where: { fromCurrency, toCurrency } });
   }
 
   /** Read all latest rates anchored on `base`. Used by GET /v1/rates. */

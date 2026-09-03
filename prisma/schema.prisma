@@ -549,3 +549,19 @@ model AdminAuditLog {
   @@index([action, createdAt(sort: Desc)])
   @@map("admin_audit_log")
 }
+
+// ── PAY-008: admin FX rate overrides (§9.12) ───────────────────────────
+
+/// Admin-pinned FX rates. When a row exists for a pair, conversion uses it
+/// ahead of any provider/seed row in exchange_rates, until deleted.
+model FxRateOverride {
+  fromCurrency Currency @map("from_currency")
+  toCurrency   Currency @map("to_currency")
+  rate         Decimal  @db.Decimal(18, 8)
+  updatedBy    String?  @map("updated_by") @db.Uuid
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@id([fromCurrency, toCurrency])
+  @@map("fx_rate_overrides")
+}
