@@ -43,3 +43,58 @@ describe('roundHalfToEven', () => {
     expect(roundHalfToEven(new Prisma.Decimal('-2.5000001'))).toBe(-3n);
   });
 });
+
+// ── PAY-008: admin override precedence ──────────────────────────────────
+
+import { FxService } from './fx.service';
+import { AppException } from '../../common/problem/app-exception';
+import type { PrismaService } from '../../infra/prisma/prisma.service';
+
+describe('FxService overrides (PAY-008)', () => {
+  const prisma = {
+    fxRateOverride: {
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
+      upsert: jest.fn(),
+      deleteMany: jest.fn(),
+    },
+    exchangeRate: { findFirst: jest.fn() },
+  } as unknown as PrismaService;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const p = prisma as any;
+  const service = new FxService(
+    { business: {} } as never,
+    { name: 'stub', fetchRates: jest.fn() } as never,
+    prisma,
+  );
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('convertCurrency prefers a pinned override over provider rows', async () => {
+    p.fxRateOverride.findUnique.mockResolvedValue({
+      rate: new Prisma.Decimal('20'),
+      updatedAt: new Date('2026-09-03T00:00:00Z'),
+    });
+    const out = await service.convertCurrency(100n, 'USD', 'ZAR');
+    expect(out.rate).toBe('20');
+    expect(out.amountCents).toBe(2000n);
+    expect(p.exchangeRate.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the latest exchange_rates row when no override', async () => {
+    p.fxRateOverride.findUnique.mockResolvedValue(null);
+    p.exchangeRate.findFirst.mockResolvedValue({
+      rate: new Prisma.Decimal('18.5'),
+      asOf: new Date('2026-09-02T00:00:00Z'),
+    });
+    const out = await service.convertCurrency(100n, 'USD', 'ZAR');
+    expect(out.rate).toBe('18.5');
+    expect(out.amountCents).toBe(1850n);
+  });
+
+  it('putOverride rejects self-pairs and non-positive rates', async () => {
+    await expect(service.putOverride('ZAR', 'ZAR', '1')).rejects.toBeInstanceOf(AppException);
+    await expect(service.putOverride('USD', 'ZAR', '0')).rejects.toBeInstanceOf(AppException);
+    expect(p.fxRateOverride.upsert).not.toHaveBeenCalled();
+  });
+});
