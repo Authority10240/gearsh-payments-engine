@@ -55,10 +55,20 @@ export class PaymentIntentsService {
     const clientCurrency: Currency = input.clientCurrency ?? input.currency;
 
     // Pre-check (race-tolerant: the unique index is the source of truth).
+    // PAY-REPAIR-005: a retried checkout re-creates the same intent — when
+    // the existing one matches the request and is still payable, creation is
+    // idempotent and returns it instead of 409ing the whole checkout.
     const existing = await this.prisma.paymentIntent.findUnique({
       where: { bookingId: input.bookingId },
     });
     if (existing) {
+      if (
+        existing.userId === input.clientId &&
+        existing.totalCents === total &&
+        (existing.state === IntentState.CREATED || existing.state === IntentState.LOCKED)
+      ) {
+        return this.toView(existing);
+      }
       throw new AppException(ErrorCode.PAYMENT_INTENT_EXISTS_FOR_BOOKING, {
         detail: `A payment intent already exists for booking ${input.bookingId}.`,
       });
@@ -110,6 +120,21 @@ export class PaymentIntentsService {
       return this.toView(created);
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        // PAY-REPAIR-005: a retried checkout (network blip, crashed caller)
+        // re-creates the same intent. When the existing intent matches the
+        // request — same client, same total, still payable — creation is
+        // idempotent and returns it instead of 409ing the whole checkout.
+        const existing = await this.prisma.paymentIntent.findFirst({
+          where: { bookingId: input.bookingId },
+        });
+        if (
+          existing &&
+          existing.userId === input.clientId &&
+          Number(existing.totalCents) === input.totalCents &&
+          (existing.state === IntentState.CREATED || existing.state === IntentState.LOCKED)
+        ) {
+          return this.toView(existing);
+        }
         throw new AppException(ErrorCode.PAYMENT_INTENT_EXISTS_FOR_BOOKING, {
           detail: `A payment intent already exists for booking ${input.bookingId}.`,
         });
