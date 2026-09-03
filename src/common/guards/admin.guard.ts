@@ -26,9 +26,16 @@ export class AdminGuard implements CanActivate {
   constructor(private readonly redis: RedisService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const user = context.switchToHttp().getRequest<Request>().user;
+    const req = context.switchToHttp().getRequest<Request>();
+    const user = req.user;
     if (!user) throw new AppException(ErrorCode.UNAUTHENTICATED);
-    if (!user.roles.includes('ADMIN')) {
+    // AUTH-005 staff tiers: FINANCE has FULL access on the payments engine;
+    // SUPPORT/CONTENT_MANAGER are read-only; ADMIN unchanged.
+    const full = user.roles.includes('ADMIN') || user.roles.includes('FINANCE');
+    const staffRead =
+      ['GET', 'HEAD'].includes(req.method) &&
+      ['SUPPORT', 'CONTENT_MANAGER'].some((r) => user.roles.includes(r));
+    if (!full && !staffRead) {
       throw new AppException(ErrorCode.ADMIN_REQUIRED);
     }
     if (user.sid) {
