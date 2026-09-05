@@ -193,6 +193,57 @@ export class PayFastWebhookService {
     return { status: 'ok' };
   }
 
+  /**
+   * PAY-010 — dev-only payment completion. The real ITN cannot reach a
+   * laptop (PayFast's servers cannot call localhost) and the webhook's
+   * gates (IP whitelist, signature, server-to-server validate) rightly
+   * cannot be faked, so the entire post-payment platform half was
+   * untestable locally. This runs the SAME commitComplete the webhook
+   * runs — identical intent transition, escrow hold, balanced ledger
+   * entries and outbox events — for the intent OWNER, on a LOCKED
+   * intent, only when env != production (the controller also 404s the
+   * whole surface in production).
+   */
+  async devComplete(
+    intentId: string,
+    callerUserId: string,
+    callerRoles: string[],
+  ): Promise<{ status: 'ok'; intentId: string }> {
+    if (this.config.env === 'production') {
+      throw new AppException(ErrorCode.NOT_FOUND);
+    }
+    const intent = await this.prisma.paymentIntent.findUnique({ where: { id: intentId } });
+    if (!intent) throw new AppException(ErrorCode.NOT_FOUND);
+    if (intent.userId !== callerUserId && !callerRoles.includes('ADMIN')) {
+      throw new AppException(ErrorCode.NOT_FOUND);
+    }
+    if (intent.state === IntentState.SUCCEEDED) {
+      return { status: 'ok', intentId }; // idempotent
+    }
+    if (intent.state !== IntentState.LOCKED || intent.zarAmountCentsLocked === null) {
+      throw new AppException(ErrorCode.ILLEGAL_TRANSITION, {
+        detail: `Intent must be LOCKED to dev-complete (current: ${intent.state}) — run checkout first.`,
+      });
+    }
+
+    const zarFee = intent.zarServiceFeeCentsLocked ?? this.deriveZarFee(intent);
+    await this.commitComplete({
+      intentId: intent.id,
+      bookingId: intent.bookingId,
+      clientId: intent.userId,
+      artistId: intent.artistId,
+      currency: intent.currency,
+      zarAmount: BigInt(intent.zarAmountCentsLocked),
+      zarFee,
+      mPaymentId: intent.mPaymentId ?? intent.id,
+      pfPaymentId: `dev-${Date.now()}`,
+      paymentStatus: PayFastPaymentStatus.COMPLETE,
+      rawPayload: { dev_simulated: 'true', completed_by: callerUserId },
+    });
+    this.logger.warn(`[dev-complete] intent ${intent.id} marked COMPLETE (simulated, non-prod)`);
+    return { status: 'ok', intentId };
+  }
+
   // ────────────────────────────────────────────────────────────────────
   // Atomic COMPLETE: transaction + intent.SUCCEEDED + escrow hold(HELD) +
   // escrow event(HELD) + 3 balanced ledger entries + 2 outbox rows.
